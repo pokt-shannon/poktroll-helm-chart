@@ -63,6 +63,25 @@ This repository contains the tools and configurations required to deploy and man
    # snapshot restore
    kubectl logs -f fullnode-poktrolld-0 -c load-snapshot
    ```
+   
+6. Monitor the sync process:
+
+   ```bash
+   watch -n 30 "kubectl exec fullnode-poktrolld-0 -c poktrolld -- poktrolld status | jq \".sync_info.latest_block_height\""  
+   ```
+
+7. To upgrade the release:
+
+   ```bash
+   ./upgrade.sh [namespace]
+   ```
+
+8. To uninstall the Helm chart, run the following command:
+
+   ```bash
+   ./uninstall.sh [namespace]
+   ```
+
 ---
 
 ## Development Goals
