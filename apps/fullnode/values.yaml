@@ -1,0 +1,120 @@
+purpose: full-node
+
+# Should be /home/pocket/.poktroll after we fully adopt production images
+homeDirectory: "/home/pocket/.poktroll"
+chownDataDirTo: 1025 # forces `chown` of the data directory to the following UID/GUID
+
+containerSecurityContext: {}
+
+image:
+  repository: ghcr.io/pokt-network/poktrolld
+  tag: 0.0.11-rc
+  pullPolicy: IfNotPresent
+
+resources: {}
+#  limits:
+#    memory: 8Gi
+#    cpu: '4'
+#  requests:
+#    memory: 8Gi
+#    cpu: '2'
+
+logs:
+  level: info
+  format: plain
+
+persistence:
+  enabled: true
+  className: ""
+  size: 100Gi
+  existingClaim: ""
+  useCustomName: false # Enable custom naming
+  customName: "" # The custom name to be used if useCustomName is true
+
+config:
+  unsafeSkipUpgrades: [] # Array of block heights to skip upgrades
+  p2p:
+    #externalAddress: ""
+    seedMode: false
+    seeds: "8b9060703e81129996234350c90f77d6ecddd11c@34.45.40.180:26656"
+    persistentPeers: ""
+    unconditionalPeerIds: ""
+
+serviceP2P:
+  enable: false
+  type: NodePort
+  port: 26656
+#  annotations: {}
+#  externalTrafficPolicy: Local
+#  internalTrafficPolicy: Local
+
+service:
+  type: ClusterIP
+  ports:
+    rpc: 26657
+    grpc: 9090
+    api: 1317
+    cometBFTMetrics: 26660
+
+serviceMonitor:
+  enabled: false
+  interval: 30s
+
+#ingress:
+#  rpc:
+#    enabled: false
+#    annotations: {}
+#    # kubernetes.io/ingress.class: nginx
+#    hosts:
+#      []
+#    # - name: rpc-endpoint.example.com
+#    tls:
+#      secretName: ""
+#  grpc:
+#    enabled: false
+#    annotations: {}
+#    # kubernetes.io/ingress.class: nginx
+#    hosts: []
+#    # - name: grpc-endpoint.example.com
+#    tls:
+#      secretName: ""
+#  api:
+#    enabled: false
+#    annotations: {}
+#    # kubernetes.io/ingress.class: nginx
+#    hosts: []
+#    # - name: api-endpoint.example.com
+#    tls:
+#      secretName: ""
+
+# Name of the secret that contains `node_key.json` and `priv_validator_key.json`.
+nodeKeysSecretName: "fullnode"
+
+# TODO: Add pre-generated config maps when we have a stable public network.
+genesis:
+  # Name of the Config Map that contains the genesis.json of the network
+  configMapName: "genesis"
+  configMapKey: genesis.json
+
+# Allows providing custom `app.toml`, `client.toml` and `config.toml`. Default files are supplied in the ` files/config ` directory.
+customConfigsConfigMap:
+  enabled: true
+  name: "fullnode"
+
+# Custom labels to add to pods
+podLabels: {}
+
+cosmovisor:
+  enabled: false
+  restartAfterUpgrade: true
+  allowDownloadBinaries: true
+  unsafeSkipBackup: false
+
+snapshot:
+  enabled: false
+  url: "https://snapshots.us-nj.poktroll.com/testnet-beta-68687-pruned.tar.gz"
+  filename: "testnet-beta-68687-pruned.tar.gz"
+  reset: false
+  threads: 8
+  height: 68687
+  format: "3"

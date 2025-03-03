@@ -1,0 +1,5 @@
+# all this are downloaded by the install.sh if they are not present
+app.toml
+client.toml
+config.toml
+genesis.json

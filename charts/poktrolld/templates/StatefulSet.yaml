@@ -1,0 +1,355 @@
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ include "poktrolld.fullname" . | quote }}
+spec:
+  serviceName: {{ include "poktrolld.fullname" . | quote }}
+  replicas: 1 # With how the helm chart is built, this should always be 1.
+  selector:
+    matchLabels:
+      {{- include "poktrolld.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "poktrolld.selectorLabels" . | nindent 8 }}
+        {{- with .Values.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      initContainers:
+      # Initializes `priv_validator_state` if it doesn't exist.
+      - name: init-priv-validator-state
+        image: busybox
+        command: ['sh', '-c', 'if [ ! -f {{ .Values.homeDirectory }}/data/priv_validator_state.json ]; then echo "{\"height\": \"0\", \"round\": 0, \"step\": 0}" > {{ .Values.homeDirectory }}/data/priv_validator_state.json; fi']
+        volumeMounts:
+        - name: pocket-volume
+          mountPath: {{ .Values.homeDirectory }}/data
+          subPath: data
+      {{- if .Values.chownDataDirTo }}
+      - name: init-permissions
+        image: busybox
+        securityContext:
+          runAsUser: 0
+          runAsGroup: 0
+        command:
+          - sh
+          - -c
+          - |
+            mkdir -p {{ .Values.homeDirectory }}/config && \
+            chown -R {{ .Values.chownDataDirTo }}:{{ .Values.chownDataDirTo }} {{ .Values.homeDirectory }} && \
+            chmod -R 755 {{ .Values.homeDirectory }}
+        volumeMounts:
+        - name: pocket-volume
+          mountPath: {{ .Values.homeDirectory }}
+      {{- end }}
+      {{- if .Values.cosmovisor.enabled }}
+      - name: init-cosmovisor
+        image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+        securityContext:
+          runAsUser: {{ .Values.chownDataDirTo | default 0 }}
+          runAsGroup: {{ .Values.chownDataDirTo | default 0 }}
+        env:
+        - name: DAEMON_NAME
+          value: "poktrolld"
+        - name: DAEMON_HOME
+          value: {{ .Values.homeDirectory | quote }}
+        - name: DAEMON_RESTART_AFTER_UPGRADE
+          value: {{ .Values.cosmovisor.restartAfterUpgrade | quote }}
+        - name: DAEMON_ALLOW_DOWNLOAD_BINARIES
+          value: {{ .Values.cosmovisor.allowDownloadBinaries | quote }}
+        - name: UNSAFE_SKIP_BACKUP
+          value: {{ .Values.cosmovisor.unsafeSkipBackup | quote }}
+        command:
+          - sh
+          - -c
+          - |
+            if [ ! -f {{ .Values.homeDirectory }}/cosmovisor/genesis/bin/poktrolld ]; then
+              cosmovisor init /bin/poktrolld
+            fi
+        volumeMounts:
+        - name: pocket-volume
+          mountPath: {{ .Values.homeDirectory }}
+      {{- end }}
+      {{- if .Values.snapshot.enabled }}
+      - name: get-snapshot
+        image: poktscan/aria2c:latest
+        imagePullPolicy: Always
+        command:
+          - sh
+          - -c
+          - |
+            # Fail on errors
+            set -e
+
+            # Variables received from environment variables
+            SNAPSHOT_URL=${SNAPSHOT_URL}
+            SNAPSHOT_DATA_DIR=${DATA_DIR}
+            PID_FILE="$DATA_DIR/download.marker"
+            RESET_SNAPSHOT=${RESET_SNAPSHOT}  # Whether to reset the snapshot (TRUE/FALSE)
+            THREADS={{ .Values.snapshot.threads | default 16 | max 1 | min 16 }}
+            SNAPSHOT_FILE="$SNAPSHOT_DATA_DIR/{{ .Values.snapshot.filename }}"
+
+            # Cleanup function to execute in case of any errors
+            cleanup() {
+                echo "An error occurred. Cleaning up..."
+                if [[ -f "$SNAPSHOT_FILE" ]]; then
+                    echo "Removing snapshot file: $SNAPSHOT_FILE"
+                    rm -f "$SNAPSHOT_FILE"
+                fi
+                exit 1
+            }
+
+            # Trap any errors and execute the cleanup function
+            trap cleanup ERR
+
+            echo "Starting init process at $(date)"
+
+            # Check if reset flag is TRUE
+            if [[ "$RESET_SNAPSHOT" == "TRUE" ]]; then
+                echo "Reset flag is TRUE. Cleaning up data directory and PID file."
+                rm -rf "SNAPSHOT_FILE"
+            fi
+
+            # Check if the PID file exists
+            if [[ -f "$PID_FILE" ]]; then
+                echo "PID file exists. Snapshot already downloaded. Skipping download again."
+                exit 0
+            fi
+
+            # Download the snapshot
+            echo "Downloading snapshot from $SNAPSHOT_URL..."
+            aria2c -x "$THREADS" -s "$THREADS" --always-resume --allow-overwrite -d "$SNAPSHOT_DATA_DIR" -o {{ .Values.snapshot.filename }} "$SNAPSHOT_URL"
+            
+            # Determine the file extension and extract accordingly
+            if [[ "$SNAPSHOT_FILE" == *.tar.zst ]]; then
+              if ! [[ "$SNAPSHOT_FILE" == *.tar.gz ]]; then
+                echo "Converting .tar.zst to .tar.gz..."
+                unzstd -c "$SNAPSHOT_FILE" | gzip > "${SNAPSHOT_FILE%.zst}.gz"
+                # removing original file because this will be ignored if the pid file is there.
+                rm -rf $SNAPSHOT_FILE
+                # Update the variable to point to the new .tar.gz file
+                SNAPSHOT_FILE="${SNAPSHOT_FILE%.zst}.gz"
+                echo "New Snapshot File: $SNAPSHOT_FILE"  
+              fi
+            fi
+            
+            if ! [[ "$SNAPSHOT_FILE" == *.tar.gz ]]; then
+              echo "Unsupported file format: $SNAPSHOT_FILE"
+              exit 1
+            fi
+  
+            # Mark the process as complete by creating the PID file
+            echo "$SNAPSHOT_FILE" > "$PID_FILE"
+
+            echo "Snapshot $SNAPSHOT_URL downloaded successfully."
+        volumeMounts:
+          - name: pocket-volume
+            mountPath: {{ .Values.homeDirectory }}
+        env:
+          - name: SNAPSHOT_URL
+            value: {{ .Values.snapshot.url }}
+          - name: DATA_DIR
+            value: {{ .Values.homeDirectory }}
+          {{- if .Values.snapshot.reset }}
+          - name: RESET_SNAPSHOT
+            value: "TRUE"
+          {{- end }}
+        securityContext:
+          runAsUser: 1025
+          runAsGroup: 1025
+      - name: load-snapshot
+        image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+        imagePullPolicy: Always
+        command:
+          - sh
+          - -c
+          - |
+            # Fail on errors
+            set -e
+
+            # Variables received from environment variables
+            SNAPSHOT_DATA_DIR=${DATA_DIR}
+            PID_FILE="$DATA_DIR/restore.marker"
+            SNAPSHOT_FILE=$(cat "$DATA_DIR/download.marker")
+            SNAPSHOT_HEIGHT="{{ .Values.snapshot.height }}"
+
+            ls -la {{ .Values.homeDirectory }}
+            
+            # Check if the PID file exists
+            if [ -f "$PID_FILE" ]; then
+              echo "PID file exists. Skipping download and extraction."
+              exit 0
+            fi
+            
+            # Check if the snapshot file exists
+            if [ ! -f "$SNAPSHOT_FILE" ]; then
+              echo "Snapshot load fail because file does not exist: $SNAPSHOT_FILE"
+              exit 1
+            fi
+            
+            poktrolld comet reset-state --home {{ .Values.homeDirectory }} --log_level debug
+            poktrolld comet unsafe-reset-all --home {{ .Values.homeDirectory }} --log_level debug
+
+            # Run the command and capture the output
+            SNAPSHOT_LIST_OUTPUT=$(poktrolld snapshots list --home {{ .Values.homeDirectory }})
+          
+            # Check if the output contains the desired snapshot height  
+            if echo "$SNAPSHOT_LIST_OUTPUT" | grep -q "height: $SNAPSHOT_HEIGHT"; then
+              echo "Snapshot found for height: $SNAPSHOT_HEIGHT. Using existing snapshot."
+              poktrolld snapshots restore --home {{ .Values.homeDirectory }} {{ .Values.snapshot.height }} {{ .Values.snapshot.format }}
+            else
+              echo "No snapshot found for height: $SNAPSHOT_HEIGHT. Loading it on poktrolld snapshots..."
+              poktrolld snapshots load $SNAPSHOT_FILE
+              poktrolld snapshots list --home {{ .Values.homeDirectory }}
+              poktrolld snapshots restore --home {{ .Values.homeDirectory }} {{ .Values.snapshot.height }} {{ .Values.snapshot.format }}
+            fi
+            
+            # overwrite priv_validator_state.json to the snapshot height
+            echo "{\"height\": \"{{ .Values.snapshot.height }}\", \"round\": 0, \"step\": 0}" > {{ .Values.homeDirectory }}/data/priv_validator_state.json
+            
+            # Remove the snapshot file after successful extraction
+            # rm -f "$SNAPSHOT_FILE"
+
+            # Mark the process as complete by creating the PID file
+            echo "Snapshot restore completed at $(date)" > "$PID_FILE"
+
+            echo "Snapshot restore completed successfully."
+        volumeMounts:
+          - name: pocket-volume
+            mountPath: {{ .Values.homeDirectory }}
+          - name: genesis-volume
+            mountPath: "{{ .Values.homeDirectory }}/config/genesis.json"
+            subPath: {{ .Values.genesis.configMapKey | quote }}
+          - name: config-volume
+            mountPath: "{{ .Values.homeDirectory }}/config/app.toml"
+            subPath: "app.toml"
+          - name: config-volume
+            mountPath: "{{ .Values.homeDirectory }}/config/config.toml"
+            subPath: "config.toml"
+          - name: config-volume
+            mountPath: "{{ .Values.homeDirectory }}/config/client.toml"
+            subPath: "client.toml"
+        env:
+          - name: DATA_DIR
+            value: {{ .Values.homeDirectory }}
+        securityContext:
+          runAsUser: 1025
+          runAsGroup: 1025
+      {{- end }}
+      containers:
+      - name: poktrolld
+        image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+        imagePullPolicy: {{ .Values.image.pullPolicy | quote }}
+        {{- if .Values.cosmovisor.enabled }}
+        command: ["/bin/cosmovisor"]
+        env:
+        - name: DAEMON_NAME
+          value: "poktrolld"
+        - name: DAEMON_HOME
+          value: {{ .Values.homeDirectory | quote }}
+        - name: DAEMON_RESTART_AFTER_UPGRADE
+          value: {{ .Values.cosmovisor.restartAfterUpgrade | quote }}
+        - name: DAEMON_ALLOW_DOWNLOAD_BINARIES
+          value: {{ .Values.cosmovisor.allowDownloadBinaries | quote }}
+        - name: UNSAFE_SKIP_BACKUP
+          value: {{ .Values.cosmovisor.unsafeSkipBackup | quote }}
+        {{- end }}
+        resources:
+{{ toYaml .Values.resources | indent 12 }}
+        securityContext:
+{{ toYaml .Values.containerSecurityContext | indent 12 }}
+        ports:
+        - containerPort: {{ .Values.service.ports.rpc }}
+          name: rpc
+        - containerPort: {{ .Values.service.ports.grpc }}
+          name: grpc
+        - containerPort: {{ .Values.service.ports.api }}
+          name: api
+        - containerPort: {{ .Values.service.ports.cometBFTMetrics }}
+          name: comet-metrics
+        - containerPort: {{ .Values.serviceP2P.port }}
+          name: p2p
+        livenessProbe:
+          httpGet:
+            path: /
+            port: {{ .Values.service.ports.rpc }}
+        readinessProbe:
+          httpGet:
+            path: /
+            port: {{ .Values.service.ports.rpc }}
+        args:
+        {{- if .Values.cosmovisor.enabled }}
+        - run
+        {{- end }}
+        - start
+        - --api.address=tcp://0.0.0.0:{{ .Values.service.ports.api }}
+        - --rpc.laddr=tcp://0.0.0.0:{{ .Values.service.ports.rpc }}
+        - --p2p.laddr=0.0.0.0:{{ .Values.serviceP2P.port }}
+        - --p2p.unconditional_peer_ids={{ .Values.config.p2p.unconditionalPeerIds }}
+        - --p2p.seeds={{ .Values.config.p2p.seeds }}
+        - --p2p.seed_mode={{ .Values.config.p2p.seedMode }}
+        - --p2p.persistent_peers={{ .Values.config.p2p.persistentPeers }}
+        {{- if .Values.config.p2p.externalAddress }}
+        - --p2p.external-address={{ .Values.config.p2p.externalAddress }}
+        {{- end }}
+        - --grpc.address=0.0.0.0:{{ .Values.service.ports.grpc }}
+        - --log_level={{ .Values.logs.level }}
+        - --log_format={{ .Values.logs.format }}
+        {{- if .Values.config.unsafeSkipUpgrades }}
+        - --unsafe-skip-upgrades={{ join "," .Values.config.unsafeSkipUpgrades }}
+        {{- end }}
+        volumeMounts:
+        - name: pocket-volume
+          mountPath: {{ .Values.homeDirectory }}/
+        - name: node-keys
+          mountPath: "{{ .Values.homeDirectory }}/config/node_key.json"
+          subPath: "node_key.json"
+        - name: node-keys
+          mountPath: "{{ .Values.homeDirectory }}/config/priv_validator_key.json"
+          subPath: "priv_validator_key.json"
+        - name: genesis-volume
+          mountPath: "{{ .Values.homeDirectory }}/config/genesis.json"
+          subPath: {{ .Values.genesis.configMapKey | quote }}
+        - name: config-volume
+          mountPath: "{{ .Values.homeDirectory }}/config/app.toml"
+          subPath: "app.toml"
+        - name: config-volume
+          mountPath: "{{ .Values.homeDirectory }}/config/config.toml"
+          subPath: "config.toml"
+        - name: config-volume
+          mountPath: "{{ .Values.homeDirectory }}/config/client.toml"
+          subPath: "client.toml"
+      volumes:
+      - name: pocket-volume
+        {{- if .Values.persistence.enabled }}
+        persistentVolumeClaim:
+          claimName: {{ if .Values.persistence.existingClaim }}
+            {{- .Values.persistence.existingClaim | quote }}
+          {{- else if .Values.persistence.useCustomName }}
+            {{- .Values.persistence.customName | quote }}
+          {{- else }}
+            {{- printf "%s-data" (include "poktrolld.fullname" .) | quote }}
+          {{- end }}
+        {{- else }}
+          emptyDir: {}
+        {{- end }}
+      - name: genesis-volume
+        configMap:
+          name: {{ .Values.genesis.configMapName | quote }}
+      - name: config-volume
+        configMap:
+{{- if not .Values.customConfigsConfigMap.enabled }}
+          name: {{ include "poktrolld.fullname" . }}-configs
+{{- else }}
+          name: {{ .Values.customConfigsConfigMap.name | quote }}
+{{- end }}
+          items:
+          - key: app.toml
+            path: app.toml
+          - key: client.toml
+            path: client.toml
+          - key: config.toml
+            path: config.toml
+      - name: node-keys
+        secret:
+          secretName: {{ .Values.nodeKeysSecretName }}

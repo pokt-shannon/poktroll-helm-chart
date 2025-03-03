@@ -1,0 +1,124 @@
+purpose: full-node
+
+# Should be /home/pocket/.poktroll after we fully adopt production images
+homeDirectory: /root/.poktroll
+chownDataDirTo: "" # forces `chown` of the data directory to the following UID/GUID
+
+image:
+  repository: ghcr.io/pokt-network/poktrolld
+  tag: latest
+  pullPolicy: IfNotPresent
+
+resources:
+  {}
+  # requests:
+  #   cpu: 100m
+  #   memory: 128Mi
+  # limits:
+  #   cpu: 2000m
+  #   memory: 2048Mi
+
+containerSecurityContext:
+  {}
+  # readOnlyRootFilesystem: true
+  # allowPrivilegeEscalation: false
+  # capabilities:
+  #   drop:
+  #     - ALL
+
+logs:
+  level: info
+  format: plain
+
+persistence:
+  enabled: true
+  className: ""
+  size: 1Gi
+  existingClaim: ""
+  useCustomName: false # Enable custom naming
+  customName: "" # The custom name to be used if useCustomName is true
+
+config:
+  unsafeSkipUpgrades: [] # Array of block heights to skip upgrades
+  p2p:
+    externalAddress: ""
+    seedMode: false
+    seeds: ""
+    persistentPeers: ""
+    unconditionalPeerIds: ""
+
+serviceP2P:
+  type: ClusterIP
+  port: 26656
+  annotations: {}
+  externalTrafficPolicy: Cluster
+  internalTrafficPolicy: Cluster
+
+service:
+  type: ClusterIP
+  ports:
+    rpc: 26657
+    grpc: 9090
+    api: 1317
+    cometBFTMetrics: 26660
+
+serviceMonitor:
+  enabled: false
+  interval: 30s
+
+ingress:
+  rpc:
+    enabled: false
+    annotations:
+      {}
+      # kubernetes.io/ingress.class: nginx
+    hosts:
+      []
+      # - name: rpc-endpoint.example.com
+    tls:
+      secretName: ""
+  grpc:
+    enabled: false
+    annotations:
+      {}
+      # kubernetes.io/ingress.class: nginx
+    hosts:
+      []
+      # - name: grpc-endpoint.example.com
+    tls:
+      secretName: ""
+  api:
+    enabled: false
+    annotations:
+      {}
+      # kubernetes.io/ingress.class: nginx
+    hosts:
+      []
+      # - name: api-endpoint.example.com
+    tls:
+      secretName: ""
+
+# Name of the secret that contains `node_key.json` and `priv_validator_key.json`.
+nodeKeysSecretName: ""
+
+# TODO: Add pre-generated config maps when we have a stable public network.
+genesis:
+  # Name of the Config Map that containts the genesis.json of the network
+  configMapName: ""
+  configMapKey: genesis.json
+
+# Allows to provide custom `app.toml`, `client.toml` and `config.toml`. Default files are supplied in `files/config` directory.
+customConfigsConfigMap:
+  enabled: false
+  name: ""
+
+# Custom labels to add to pods
+podLabels:
+  {}
+  # example-label: example-value
+
+cosmovisor:
+  enabled: false
+  restartAfterUpgrade: true
+  allowDownloadBinaries: true
+  unsafeSkipBackup: false
